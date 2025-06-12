@@ -63,4 +63,3 @@ func GetJobByID(id string) (*Job, error) {
 	}
 	return &job, nil
 }
-

@@ -30,17 +30,17 @@ func InitClient(redisAddr string) error {
 }
 
 func EnqueueScript(scriptID string) (*asynq.TaskInfo, error) {
-    jobID := uuid.NewString()
-    payload, err := json.Marshal(RunScriptPayload{
-        ScriptID: scriptID,
-        JobID:    jobID,
-    })
-    if err != nil {
-        return nil, err
-    }
+	jobID := uuid.NewString()
+	payload, err := json.Marshal(RunScriptPayload{
+		ScriptID: scriptID,
+		JobID:    jobID,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-    // Store job reference BEFORE enqueuing
-    startedAt := time.Now().Format(time.RFC3339)
+	// Store job reference BEFORE enqueuing
+	startedAt := time.Now().Format(time.RFC3339)
 	err = db.InsertJob(db.Job{
 		ID:        jobID,
 		ScriptID:  scriptID,
@@ -51,31 +51,28 @@ func EnqueueScript(scriptID string) (*asynq.TaskInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create job record: %w", err)
 	}
-    
-    // Only enqueue after successful database insert
-    task := asynq.NewTask(TypeRunScript, payload)
-    info, err := Client.Enqueue(task)
-    if err != nil {
-        return nil, err
-    }
-    
-    // Return the job ID we generated (not the task ID)
-    info.ID = jobID
-    return info, nil
+
+	// Only enqueue after successful database insert
+	task := asynq.NewTask(TypeRunScript, payload)
+	info, err := Client.Enqueue(task)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return the job ID we generated (not the task ID)
+	info.ID = jobID
+	return info, nil
 }
-
-
 
 func NewServer(redisAddr string) *asynq.Server {
 	return asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr}, asynq.Config{
 		Concurrency: 1,
-		 Queues: map[string]int{
+		Queues: map[string]int{
 			"default": 10,
 		},
 		// Enable more verbose logging
-		LogLevel: asynq.DebugLevel,
-		StrictPriority: true, 
-		
+		LogLevel:       asynq.DebugLevel,
+		StrictPriority: true,
 	})
 }
 
@@ -96,7 +93,7 @@ func Handler() asynq.Handler {
 
 			cfg := runner.VMConfig{
 				KernelImagePath: "vm/images/vmlinux",
-    			RootFSPath:      "vm/images/rootfs.ext4",
+				RootFSPath:      "vm/images/rootfs.ext4",
 				ScriptPath:      scriptPath,
 				LogPath:         logPath,
 				MemSizeMB:       128,
