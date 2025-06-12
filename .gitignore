@@ -1,0 +1,11 @@
+*.log
+*/*.log
+jobs.db
+release-v1.3.3-x86_64/*
+
+vm/images/rootfs.ext4
+vm/images/vmlinux
+
+test_script.sh
+scripts/*.sh
+*.tgz

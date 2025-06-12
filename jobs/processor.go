@@ -19,6 +19,7 @@ const (
 
 type RunScriptPayload struct {
 	ScriptID string
+	JobID    string // Add this field
 }
 
 var Client *asynq.Client
@@ -29,21 +30,52 @@ func InitClient(redisAddr string) error {
 }
 
 func EnqueueScript(scriptID string) (*asynq.TaskInfo, error) {
-	payload, err := json.Marshal(RunScriptPayload{ScriptID: scriptID})
+    jobID := uuid.NewString()
+    payload, err := json.Marshal(RunScriptPayload{
+        ScriptID: scriptID,
+        JobID:    jobID,
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    // Store job reference BEFORE enqueuing
+    startedAt := time.Now().Format(time.RFC3339)
+	err = db.InsertJob(db.Job{
+		ID:        jobID,
+		ScriptID:  scriptID,
+		Status:    "pending",
+		LogPath:   filepath.Join("logs", jobID+".log"),
+		StartedAt: startedAt,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create job record: %w", err)
 	}
-
-	task := asynq.NewTask(TypeRunScript, payload)
-	return Client.Enqueue(task)
+    
+    // Only enqueue after successful database insert
+    task := asynq.NewTask(TypeRunScript, payload)
+    info, err := Client.Enqueue(task)
+    if err != nil {
+        return nil, err
+    }
+    
+    // Return the job ID we generated (not the task ID)
+    info.ID = jobID
+    return info, nil
 }
-
 
 
 
 func NewServer(redisAddr string) *asynq.Server {
 	return asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr}, asynq.Config{
 		Concurrency: 1,
+		 Queues: map[string]int{
+			"default": 10,
+		},
+		// Enable more verbose logging
+		LogLevel: asynq.DebugLevel,
+		StrictPriority: true, 
+		
 	})
 }
 
@@ -56,18 +88,11 @@ func Handler() asynq.Handler {
 				return err
 			}
 
-			jobID := uuid.NewString()
+			jobID := payload.JobID
 			scriptPath := filepath.Join("scripts", payload.ScriptID+".sh")
 			logPath := filepath.Join("logs", jobID+".log")
 
-			startedAt := time.Now().Format(time.RFC3339)
-			_ = db.InsertJob(db.Job{
-				ID:        jobID,
-				ScriptID:  payload.ScriptID,
-				Status:    "running",
-				LogPath:   logPath,
-				StartedAt: startedAt,
-			})
+			db.UpdateJobStatus(jobID, "running", "")
 
 			cfg := runner.VMConfig{
 				KernelImagePath: "vm/images/vmlinux",
