@@ -18,15 +18,22 @@ type UploadResponse struct {
 }
 
 func UploadScript(w http.ResponseWriter, r *http.Request) {
-	file, _, err := r.FormFile("script")
+	file, header, err := r.FormFile("script")
 	if err != nil {
 		http.Error(w, "invalid file upload", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
+	// Get the original file extension
+    originalFilename := header.Filename
+    extension := filepath.Ext(originalFilename)
+    if extension == "" {
+        extension = ".sh" // Default to shell script if no extension provided
+    }
+
 	scriptID := uuid.NewString()
-	scriptPath := filepath.Join("scripts", scriptID+".sh")
+	scriptPath := filepath.Join("scripts", scriptID+extension)
 
 	if err := os.MkdirAll("scripts", 0755); err != nil {
 		http.Error(w, "failed to prepare storage", http.StatusInternalServerError)
@@ -62,12 +69,21 @@ func UploadScript(w http.ResponseWriter, r *http.Request) {
 
 func RunScript(w http.ResponseWriter, r *http.Request) {
 	scriptID := chi.URLParam(r, "id")
-	scriptPath := filepath.Join("scripts", scriptID+".sh")
-
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		http.Error(w, "script not found", http.StatusNotFound)
-		return
-	}
+    var fileExists bool
+    
+    // Check for common extensions
+    for _, ext := range []string{".py", ".sh", ""} {
+        path := filepath.Join("scripts", scriptID+ext)
+        if _, err := os.Stat(path); err == nil {
+            fileExists = true
+            break
+        }
+    }
+    
+    if !fileExists {
+        http.Error(w, "script not found", http.StatusNotFound)
+        return
+    }
 
 	info, err := jobs.EnqueueScript(scriptID)
 	if err != nil {

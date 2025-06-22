@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -86,7 +87,20 @@ func Handler() asynq.Handler {
 			}
 
 			jobID := payload.JobID
-			scriptPath := filepath.Join("scripts", payload.ScriptID+".sh")
+			scriptID := payload.ScriptID
+            var scriptPath string
+            for _, ext := range []string{".sh", ".py", ""} {
+                path := filepath.Join("scripts", scriptID+ext)
+                if _, err := os.Stat(path); err == nil {
+                    scriptPath = path
+                    break
+                }
+            }
+            
+            if scriptPath == "" {
+                return fmt.Errorf("script not found: %s", scriptID)
+            }
+
 			logPath := filepath.Join("logs", jobID+".log")
 
 			db.UpdateJobStatus(jobID, "running", "")

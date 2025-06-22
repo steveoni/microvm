@@ -9,3 +9,4 @@ vm/images/vmlinux
 test_script.sh
 scripts/*.sh
 *.tgz
+*.py
