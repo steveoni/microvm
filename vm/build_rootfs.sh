@@ -123,6 +123,36 @@ mount -t devtmpfs devtmpfs /dev
 
 echo "MicroVM init starting..."
 
+# Setup networking if eth0 exists
+if ip link show eth0 >/dev/null 2>&1; then
+    echo "Setting up networking..."
+    # Configure eth0 (should already have IP from kernel boot args)
+    ip link set eth0 up
+    ip addr show eth0
+    
+    # Configure DNS
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    
+    # Test connectivity
+    echo "Testing network connectivity..."
+    ping -c 1 -w 2 8.8.8.8 || echo "Cannot reach DNS server"
+fi
+
+# Enhanced network diagnostics
+echo "Running network diagnostics..."
+echo "IP configuration:"
+ip addr show
+echo "Routing table:"
+ip route
+echo "Testing DNS server connectivity:"
+ping -c 1 8.8.8.8 || echo "Cannot ping Google DNS"
+echo "Testing DNS resolution:"
+nslookup google.com || echo "DNS resolution failed"
+echo "Testing DNS resolution with busybox:"
+busybox nslookup google.com || echo "Busybox DNS resolution failed"
+
+
 # Mount script drive
 mkdir -p /mnt/script
 mount /dev/vdb /mnt/script
@@ -139,6 +169,15 @@ echo "System information:"
 uname -a
 echo "Available binaries:"
 ls -la /usr/local/bin /bin | grep python
+
+# Network status if available
+if ip link show eth0 >/dev/null 2>&1; then
+    echo "Network configuration:"
+    ip addr show
+    echo "DNS configuration:"
+    cat /etc/resolv.conf
+fi
+
 echo "Library path:"
 echo \$LD_LIBRARY_PATH
 

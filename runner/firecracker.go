@@ -2,10 +2,12 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -23,6 +25,161 @@ type VMConfig struct {
 	LogPath         string
 	MemSizeMB       int64
 	CPUs            int64
+	EnableNetwork bool
+}
+
+// setupNetworking creates and configures a TAP device for VM networking
+func setupNetworking(vmID string, logger *logrus.Entry) (string, error) {
+    tapName := fmt.Sprintf("fc-tap-%s", vmID[:8])
+    
+    // Create TAP device
+    cmd := exec.Command("sudo", "ip", "tuntap", "add", tapName, "mode", "tap")
+    if err := cmd.Run(); err != nil {
+        return "", fmt.Errorf("failed to create TAP device: %w", err)
+    }
+    
+    // Set TAP device up
+    cmd = exec.Command("sudo", "ip", "link", "set", tapName, "up")
+    if err := cmd.Run(); err != nil {
+        return "", fmt.Errorf("failed to set TAP device up: %w", err)
+    }
+    
+    // Find default interface
+    defIface, err := getDefaultInterface()
+    if err != nil {
+        logger.Warnf("Failed to get default interface: %v", err)
+        defIface = "eth0" // Fallback
+    }
+    logger.Infof("Using %s as default interface", defIface)
+    
+    // Create bridge if it doesn't exist
+    bridgeName := "fcbr0"
+    cmd = exec.Command("sudo", "ip", "link", "show", bridgeName)
+    if err := cmd.Run(); err != nil {
+        // Bridge doesn't exist, create it
+        cmd = exec.Command("sudo", "ip", "link", "add", bridgeName, "type", "bridge")
+        if err := cmd.Run(); err != nil {
+            logger.Warnf("Failed to create bridge: %v", err)
+        }
+        
+        // Set bridge up
+        cmd = exec.Command("sudo", "ip", "link", "set", bridgeName, "up")
+        if err := cmd.Run(); err != nil {
+            logger.Warnf("Failed to set bridge up: %v", err)
+        }
+        
+        // Configure bridge IP
+        cmd = exec.Command("sudo", "ip", "addr", "add", "192.168.100.1/24", "dev", bridgeName)
+        if err := cmd.Run(); err != nil {
+            logger.Warnf("Failed to set bridge IP: %v", err)
+        }
+    }
+    
+    // Add TAP to bridge
+    cmd = exec.Command("sudo", "ip", "link", "set", tapName, "master", bridgeName)
+    if err := cmd.Run(); err != nil {
+        logger.Warnf("Failed to add TAP to bridge: %v", err)
+    }
+    
+    // Enable IP forwarding
+    cmd = exec.Command("sudo", "sysctl", "-w", "net.ipv4.ip_forward=1")
+    if err := cmd.Run(); err != nil {
+        logger.Warnf("Failed to enable IP forwarding: %v", err)
+    }
+    
+    // Check if MASQUERADE rule already exists
+    cmd = exec.Command("sudo", "iptables", "-t", "nat", "-C", "POSTROUTING", 
+                     "-s", "192.168.100.0/24", "-o", defIface, "-j", "MASQUERADE")
+    if err := cmd.Run(); err != nil {
+        // Rule doesn't exist, add it
+        cmd = exec.Command("sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", 
+                        "-s", "192.168.100.0/24", "-o", defIface, "-j", "MASQUERADE")
+        if err := cmd.Run(); err != nil {
+            logger.Warnf("Failed to add MASQUERADE rule: %v", err)
+        }
+    }
+    
+    // Allow outgoing traffic from TAP/bridge
+    cmd = exec.Command("sudo", "iptables", "-C", "FORWARD",
+                     "-i", bridgeName, "-o", defIface, "-j", "ACCEPT")
+    if err := cmd.Run(); err != nil {
+        cmd = exec.Command("sudo", "iptables", "-A", "FORWARD",
+                         "-i", bridgeName, "-o", defIface, "-j", "ACCEPT")
+        if err := cmd.Run(); err != nil {
+            logger.Warnf("Failed to add outgoing FORWARD rule: %v", err)
+        }
+    }
+    
+    // Allow established/related traffic back
+    cmd = exec.Command("sudo", "iptables", "-C", "FORWARD",
+                     "-i", defIface, "-o", bridgeName, "-m", "state",
+                     "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+    if err := cmd.Run(); err != nil {
+        cmd = exec.Command("sudo", "iptables", "-A", "FORWARD",
+                         "-i", defIface, "-o", bridgeName, "-m", "state",
+                         "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+        if err := cmd.Run(); err != nil {
+            logger.Warnf("Failed to add incoming FORWARD rule: %v", err)
+        }
+    }
+    
+    logger.Infof("Network bridge %s setup with TAP %s connected to %s", 
+                bridgeName, tapName, defIface)
+    
+    return tapName, nil
+}
+
+// cleanupNetworking removes network resources
+func cleanupNetworking(tapName string, logger *logrus.Entry) {
+    if tapName == "" {
+        return
+    }
+    
+    // Remove TAP device from bridge
+    cmd := exec.Command("sudo", "ip", "link", "set", tapName, "nomaster")
+    if err := cmd.Run(); err != nil {
+        logger.Warnf("Failed to remove TAP from bridge: %v", err)
+    }
+    
+    // Delete TAP device
+    cmd = exec.Command("sudo", "ip", "link", "delete", tapName)
+    if err := cmd.Run(); err != nil {
+        logger.Warnf("Failed to delete TAP device: %v", err)
+    } else {
+        logger.Infof("Deleted TAP device %s", tapName)
+    }
+    
+}
+
+// getDefaultInterface finds the default network interface
+func getDefaultInterface() (string, error) {
+    // Get the interface with default route
+    cmd := exec.Command("sh", "-c", "ip route | grep default | cut -d ' ' -f 5")
+    output, err := cmd.Output()
+    if err != nil {
+        return "", err
+    }
+    
+    ifName := strings.TrimSpace(string(output))
+    if ifName == "" {
+        return "", fmt.Errorf("no default interface found")
+    }
+    
+    return ifName, nil
+}
+
+// generateRandomMac creates a random MAC address for the VM interface
+func generateRandomMac() string {
+    buf := make([]byte, 6)
+    _, err := rand.Read(buf)
+    if err != nil {
+        // Fallback in case of error
+        return "02:00:00:00:00:01"
+    }
+    
+    // Ensure unicast and locally administered
+    buf[0] = (buf[0] | 2) & 0xfe
+    return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5])
 }
 
 func RunInVM(ctx context.Context, cfg VMConfig) error {
@@ -78,6 +235,19 @@ func RunInVM(ctx context.Context, cfg VMConfig) error {
 	logrusEntry := logrus.NewEntry(logger)
 	logrusEntry.Info("Starting VM process for script:", scriptPath)
 
+	// Setup networking if enabled
+    var tapName string
+    if cfg.EnableNetwork {
+        logrusEntry.Info("Setting up networking for VM...")
+        var err error
+        tapName, err = setupNetworking(vmID, logrusEntry)
+        if err != nil {
+            logrusEntry.Warnf("Failed to setup networking: %v", err)
+        } else {
+            defer cleanupNetworking(tapName, logrusEntry)
+        }
+    }
+
 	// Setup drives
 	drives := []models.Drive{
 		{
@@ -107,6 +277,29 @@ func RunInVM(ctx context.Context, cfg VMConfig) error {
 		firecracker.WithLogger(logrusEntry),
 	}
 
+	// Configure networking interfaces if enabled
+    var networkInterfaces []firecracker.NetworkInterface
+    kernelArgs := "console=ttyS0 reboot=k panic=1 pci=off init=/init"
+    
+    if cfg.EnableNetwork && tapName != "" {
+        // Generate MAC address for guest
+        guestMac := generateRandomMac()
+        
+        // Add network interface config
+        networkInterfaces = append(networkInterfaces, firecracker.NetworkInterface{
+            StaticConfiguration: &firecracker.StaticNetworkConfiguration{
+                MacAddress:  guestMac,
+                HostDevName: tapName,
+            },
+        })
+        
+        // Modify kernel args to include network config
+        // Configure static IP for predictability
+        kernelArgs += " ip=192.168.100.2::192.168.100.1:255.255.255.0::eth0:off"
+        logrusEntry.Infof("Network interface configured with MAC %s on TAP device %s", 
+                           guestMac, tapName)
+    }
+
 	// Create VM configuration - LET FIRECRACKER CREATE THE FIFO
 	fcCfg := firecracker.Config{
 		SocketPath:      socketPath,
@@ -117,11 +310,11 @@ func RunInVM(ctx context.Context, cfg VMConfig) error {
 			MemSizeMib: firecracker.Int64(cfg.MemSizeMB),
 		},
 		JailerCfg:         nil,
-		NetworkInterfaces: []firecracker.NetworkInterface{},
+		NetworkInterfaces: networkInterfaces,
 		LogFifo:           fifoPath,
 		MetricsFifo:       metricsPath,
 		LogLevel:          "Debug",
-		KernelArgs:        "console=ttyS0 reboot=k panic=1 pci=off init=/init",
+		KernelArgs:        kernelArgs,
 	}
 
 	// Create the VM

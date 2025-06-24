@@ -112,6 +112,7 @@ func Handler() asynq.Handler {
 				LogPath:         logPath,
 				MemSizeMB:       128,
 				CPUs:            1,
+				EnableNetwork:   true,
 			}
 			err := runner.RunInVM(ctx, cfg)
 			status := "success"
